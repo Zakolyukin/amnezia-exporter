@@ -2,7 +2,10 @@
 
 Prometheus-экспортер для **WireGuard / AmneziaWG**: отдаёт трафик по каждому peer (кумулятивные `rx`/`tx` в байтах из счётчиков ядра) плюс label с человекочитаемым именем клиента.
 
-Под капотом — обычный `wg show all dump` или `awg show all dump`, разобранный в метрики.
+Под капотом — `wg show all dump` или `awg show all dump`, разобранный в метрики. Парсер понимает оба формата:
+
+- классический WireGuard: device-строка из 5 полей + peer-строка из 8;
+- AmneziaWG: расширенная device-строка (10+ полей с обфускационными `Jc/Jmin/Jmax/S1..S2/H1..H4/I1..I5`) + peer-строка из 9 полей (первое — имя интерфейса).
 
 ## Метрики
 
@@ -110,7 +113,8 @@ amnezia_wg_peer_receive_bytes{interface="awg0",name="alice",peer_id="p_…",pubk
 
 | Симптом | Где копать |
 |---|---|
-| `amnezia_wg_scrape_ok 0` или `peer_count 0` | `docker exec amnezi-exporter awg show all dump` — если пусто или ошибка, проверьте `network_mode: host`, `cap_add: NET_ADMIN`, проброс `/usr/bin/awg`. |
+| `amnezia_wg_scrape_ok 1`, но `peer_count 0` при живом туннеле | Дамп вернул что-то, но парсер не распознал. Сравните количество полей в строке (`awg show all dump | awk -F'\t' 'NR<=3{print NF}'`) с теми, что описаны выше. Если формат не 5/8/9/10+ — заведите issue. |
+| `amnezia_wg_scrape_ok 0` или `peer_count 0` при пустом дампе | `docker exec amnezi-exporter awg show all dump` — если пусто или ошибка, проверьте `network_mode: host`, `cap_add: NET_ADMIN`, проброс `/usr/bin/awg`. |
 | `awg: command not found` внутри контейнера | На хосте: `which awg`. Если путь отличается — поправьте volume в compose. |
 | `peer_count` корректный, но `name=""` для всех | Экспортер не видит источник имён. `docker exec amnezi-exporter ls /etc/amnezia/amneziawg` и `docker exec amnezi-exporter ls /opt/amnezia/awg`. Проверьте `AMNEZIA_PEERS_CONF_DIR` в `.env`. |
 | Имена есть только для части пиров | Над оставшимися `[Peer]` в `awg0.conf` нет коммента `# Name: …`. Допишите — через 30 сек подтянется. |

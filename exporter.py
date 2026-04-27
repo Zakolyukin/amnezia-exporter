@@ -160,26 +160,44 @@ def load_peer_names() -> dict[str, str]:
 
 def parse_wg_dump(text: str) -> list[tuple[str, str, int, int]]:
     """
-    `wg show all dump`: строка устройства — 5 полей; строка peer — 8 полей
-    (public, psk, endpoint, allowed, handshake, rx, tx, keepalive).
+    Поддерживает оба формата дампа:
+
+    - `wg show all dump` (классический WireGuard):
+        device-строка — 5 полей (iface, priv, pub, listen, fwmark);
+        peer-строка   — 8 полей (pub, psk, endpoint, allowed, hs, rx, tx, keepalive).
+
+    - `awg show all dump` (AmneziaWG):
+        device-строка — много полей (10+), включая обфускацию Jc/Jmin/Jmax/S/H/I…;
+        peer-строка   — 9 полей: первым добавлено имя интерфейса
+                       (iface, pub, psk, endpoint, allowed, hs, rx, tx, keepalive).
+
+    Возвращает список (interface, pubkey, rx_bytes, tx_bytes).
     """
     rows: list[tuple[str, str, int, int]] = []
     current_if = "unknown"
 
     for line in text.splitlines():
-        line = line.strip()
-        if not line:
+        if not line.strip():
             continue
         parts = line.split("\t")
-        if len(parts) == 5:
-            current_if = parts[0] or "unknown"
-            continue
-        if len(parts) == 8:
+        n = len(parts)
+
+        if n == 9:
+            iface, pubkey, _psk, _ep, _ips, _hs, rx_s, tx_s, _ka = parts
+            try:
+                rows.append((iface or current_if, pubkey, int(rx_s), int(tx_s)))
+            except ValueError:
+                log.warning("bad awg peer line: %r", line[:120])
+        elif n == 8:
             pubkey, _psk, _ep, _ips, _hs, rx_s, tx_s, _ka = parts
             try:
                 rows.append((current_if, pubkey, int(rx_s), int(tx_s)))
             except ValueError:
-                log.warning("bad peer line: %r", line[:100])
+                log.warning("bad wg peer line: %r", line[:120])
+        elif n >= 5:
+            current_if = parts[0] or "unknown"
+        else:
+            log.warning("unknown dump line (%d fields): %r", n, line[:120])
     return rows
 
 
@@ -248,7 +266,7 @@ class AmneziaCollector:
             "Exporter version (always 1)",
             labels=["version"],
         )
-        ver_f.add_metric(["0.3.0"], 1.0)
+        ver_f.add_metric(["0.3.1"], 1.0)
         yield ver_f
 
         ok, text = self._get_dump()
