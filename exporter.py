@@ -54,7 +54,9 @@ def _pubkey_short(public_key: str) -> str:
     return public_key[:12] if len(public_key) >= 12 else public_key
 
 
-_NAME_LINE_RE = re.compile(r"^\s*#\s*(?:Name|name)\s*[:=]\s*(.+?)\s*$")
+_NAME_LINE_RE = re.compile(
+    r"^\s*#+\s*(?:Name|name|Client|client)\s*[:=]?\s*(.+?)\s*$"
+)
 _PUBKEY_LINE_RE = re.compile(r"^\s*PublicKey\s*=\s*([A-Za-z0-9+/=]+)\s*$")
 
 
@@ -266,7 +268,7 @@ class AmneziaCollector:
             "Exporter version (always 1)",
             labels=["version"],
         )
-        ver_f.add_metric(["0.3.1"], 1.0)
+        ver_f.add_metric(["0.3.2"], 1.0)
         yield ver_f
 
         ok, text = self._get_dump()

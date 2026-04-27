@@ -35,13 +35,21 @@ increase(amnezia_wg_peer_receive_bytes[24h]) + increase(amnezia_wg_peer_transmit
 В выводе `wg/awg show dump` имён клиентов нет. Экспортер сам ищет имя по `PublicKey` и проставляет его как label `name`. Источники проверяются **по приоритету сверху вниз** — побеждает первый найденный:
 
 1. **`clientsTable`** Amnezia-сервера (если он у вас есть) — по умолчанию ищется в `/opt/amnezia/awg/clientsTable` и `/opt/amnezia/wireguard/clientsTable`. Поддерживается несколько встречающихся форматов файла (`clientId` / `publicKey` / `wireguardConfig.clientPubKey` + `userData.clientName` / `clientName` / `name`).
-2. **Комментарии `# Name: …` в `*.conf`** в каталоге `AMNEZIA_PEERS_CONF_DIR` (по умолчанию `/etc/amnezia/amneziawg`):
+2. **Комментарии в `*.conf`** в каталоге `AMNEZIA_PEERS_CONF_DIR` (по умолчанию `/etc/amnezia/amneziawg`). Поддерживаются любые из форматов, которые встречаются у популярных GUI:
    ```ini
    # Name: alice
    [Peer]
-   PublicKey = AbCdEf...pubkey=
-   AllowedIPs = 10.8.1.2/32
+   PublicKey = AbCdEf...
+
+   ### Client bob          # формат, который пишет Amnezia GUI
+   [Peer]
+   PublicKey = GhIjKl...
+
+   # Client: charlie
+   [Peer]
+   PublicKey = MnOpQr...
    ```
+   Регексп: `^\s*#+\s*(Name|name|Client|client)\s*[:=]?\s*(.+)$`. Ассоциация с peer'ом — по ближайшему `PublicKey` ниже.
 3. **JSON-файл `peers.json`** (внутри контейнера `/data/peers.json`), для ручных правок:
    ```json
    {
