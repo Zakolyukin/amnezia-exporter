@@ -35,6 +35,15 @@ WG_TIMEOUT = int(os.getenv("AMNEZIA_WG_TIMEOUT", "5"))
 PEERS_JSON = os.getenv("AMNEZIA_PEERS_JSON", "/data/peers.json")
 # 2) Конфиги wg/awg, где над [Peer] коммент вида "# Name: alice"
 PEERS_CONF_DIR = os.getenv("AMNEZIA_PEERS_CONF_DIR", "/etc/wireguard")
+# 3) clientsTable Amnezia-сервера (несколько путей через ":")
+CLIENTS_TABLE_PATHS = [
+    p.strip()
+    for p in os.getenv(
+        "AMNEZIA_CLIENTS_TABLE",
+        "/opt/amnezia/awg/clientsTable:/opt/amnezia/wireguard/clientsTable",
+    ).split(":")
+    if p.strip()
+]
 
 
 def _peer_id(public_key: str) -> str:
@@ -49,28 +58,68 @@ _NAME_LINE_RE = re.compile(r"^\s*#\s*(?:Name|name)\s*[:=]\s*(.+?)\s*$")
 _PUBKEY_LINE_RE = re.compile(r"^\s*PublicKey\s*=\s*([A-Za-z0-9+/=]+)\s*$")
 
 
+def _names_from_clients_table(path: str) -> dict[str, str]:
+    """
+    Парсер реестра клиентов Amnezia-сервера.
+
+    Поддерживаемые формы:
+      - top-level: список клиентов
+      - top-level: dict с ключом "clients" (список)
+    В каждом элементе ищем pubkey в одном из:
+        clientId | publicKey | public_key | wireguardConfig.clientPubKey
+    Имя в одном из:
+        userData.clientName | clientName | name
+    """
+    out: dict[str, str] = {}
+    if not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log.warning("can't parse %s: %s", path, e)
+        return out
+
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict) and isinstance(data.get("clients"), list):
+        items = data["clients"]
+    else:
+        return out
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        wgc = it.get("wireguardConfig") if isinstance(it.get("wireguardConfig"), dict) else {}
+        pk = (
+            it.get("clientId")
+            or it.get("publicKey")
+            or it.get("public_key")
+            or wgc.get("clientPubKey")
+        )
+        ud = it.get("userData") if isinstance(it.get("userData"), dict) else {}
+        name = ud.get("clientName") or it.get("clientName") or it.get("name")
+        if isinstance(pk, str) and isinstance(name, str) and name.strip():
+            out.setdefault(pk, name.strip())
+    return out
+
+
 def load_peer_names() -> dict[str, str]:
     """
     Возвращает мапу public_key -> name.
-    Источник 1: JSON-файл {"<pubkey>": "<name>"}.
-    Источник 2: *.conf в PEERS_CONF_DIR. Пример:
-
-        # Name: alice
-        [Peer]
-        PublicKey = abcd...
+    Источники (первый победил):
+      1) Amnezia clientsTable (CLIENTS_TABLE_PATHS).
+      2) Конфиги wg/awg в PEERS_CONF_DIR, где над [Peer] коммент "# Name: alice".
+      3) JSON-файл PEERS_JSON {"<pubkey>": "<name>"} (ручные правки).
     """
     mapping: dict[str, str] = {}
 
-    try:
-        if os.path.isfile(PEERS_JSON):
-            with open(PEERS_JSON, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    for k, v in data.items():
-                        if isinstance(k, str) and isinstance(v, str):
-                            mapping[k] = v
-    except Exception as e:
-        log.warning("can't read %s: %s", PEERS_JSON, e)
+    for path in CLIENTS_TABLE_PATHS:
+        try:
+            for k, v in _names_from_clients_table(path).items():
+                mapping.setdefault(k, v)
+        except Exception as e:
+            log.warning("clientsTable %s: %s", path, e)
 
     try:
         if os.path.isdir(PEERS_CONF_DIR):
@@ -94,6 +143,17 @@ def load_peer_names() -> dict[str, str]:
                     log.warning("can't read %s: %s", path, e)
     except Exception as e:
         log.warning("can't list %s: %s", PEERS_CONF_DIR, e)
+
+    try:
+        if os.path.isfile(PEERS_JSON):
+            with open(PEERS_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(k, str) and isinstance(v, str):
+                            mapping[k] = v
+    except Exception as e:
+        log.warning("can't read %s: %s", PEERS_JSON, e)
 
     return mapping
 
@@ -188,7 +248,7 @@ class AmneziaCollector:
             "Exporter version (always 1)",
             labels=["version"],
         )
-        ver_f.add_metric(["0.2.0"], 1.0)
+        ver_f.add_metric(["0.3.0"], 1.0)
         yield ver_f
 
         ok, text = self._get_dump()

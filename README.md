@@ -1,56 +1,125 @@
 # amnezi-exporter
 
-Prometheus exporter: трафик **по каждому WireGuard/AmneziaWG peer** из `wg show all dump` (кумулятивные `rx`/`tx` в байтах).
+Prometheus-экспортер для **WireGuard / AmneziaWG**: отдаёт трафик по каждому peer (кумулятивные `rx`/`tx` в байтах из счётчиков ядра) плюс label с человекочитаемым именем клиента.
+
+Под капотом — обычный `wg show all dump` или `awg show all dump`, разобранный в метрики.
 
 ## Метрики
 
-| Имя | Описание |
-|-----|----------|
-| `amnezia_up` | Сервис жив (1) |
-| `amnezia_wg_scrape_ok` | Успешен ли последний dump (1/0) |
-| `amnezia_wg_peer_count` | Сколько peer в дампе |
-| `amnezia_wg_peer_receive_bytes` | Кумулятив rx, labels: `interface`, `peer_id`, `pubkey_short` |
-| `amnezia_wg_peer_transmit_bytes` | Кумулятив tx, те же labels |
-| `amnezia_wg_scrape_errors_total` | Счётчик неудачных dump |
+| Имя | Тип | Описание |
+|-----|-----|----------|
+| `amnezia_up` | gauge | Экспортер жив (всегда 1) |
+| `amnezia_exporter_info{version}` | gauge | Версия экспортера |
+| `amnezia_wg_scrape_ok` | gauge | 1 если последний dump прошёл успешно, иначе 0 |
+| `amnezia_wg_peer_count` | gauge | Сколько peer найдено в последнем dump |
+| `amnezia_wg_peer_receive_bytes{interface,peer_id,pubkey_short,name}` | gauge | Кумулятивный rx (байты, счётчик ядра) |
+| `amnezia_wg_peer_transmit_bytes{interface,peer_id,pubkey_short,name}` | gauge | Кумулятивный tx (байты, счётчик ядра) |
+| `amnezia_wg_scrape_errors_total` | counter | Сколько раз dump падал |
 
-**Скорость (байт/с) на peer:**
+Полезные запросы в Prometheus / Grafana:
+
 ```promql
-rate(amnezia_wg_peer_receive_bytes[5m])
-rate(amnezia_wg_peer_transmit_bytes[5m])
+rate(amnezia_wg_peer_receive_bytes[5m])    # скорость приёма, байт/с на peer
+rate(amnezia_wg_peer_transmit_bytes[5m])   # скорость отправки, байт/с на peer
+
+sum by (name) (rate(amnezia_wg_peer_receive_bytes[5m]) + rate(amnezia_wg_peer_transmit_bytes[5m]))
+
+increase(amnezia_wg_peer_receive_bytes[24h]) + increase(amnezia_wg_peer_transmit_bytes[24h])
 ```
 
-### Имя пользователя (label `name`)
+## Откуда берётся label `name`
 
-В `wg show dump` имени нет. Экспортер подмешивает label `name` из любого источника:
+В выводе `wg/awg show dump` имён клиентов нет. Экспортер сам ищет имя по `PublicKey` и проставляет его как label `name`. Источники проверяются **по приоритету сверху вниз** — побеждает первый найденный:
 
-**Вариант A — JSON-файл `peers.json`** (примонтирован в `/data/peers.json`):
-```json
-{
-  "AbCdEf...pubkey1=": "alice",
-  "GhIjKl...pubkey2=": "bob"
-}
-```
+1. **`clientsTable`** Amnezia-сервера (если он у вас есть) — по умолчанию ищется в `/opt/amnezia/awg/clientsTable` и `/opt/amnezia/wireguard/clientsTable`. Поддерживается несколько встречающихся форматов файла (`clientId` / `publicKey` / `wireguardConfig.clientPubKey` + `userData.clientName` / `clientName` / `name`).
+2. **Комментарии `# Name: …` в `*.conf`** в каталоге `AMNEZIA_PEERS_CONF_DIR` (по умолчанию `/etc/amnezia/amneziawg`):
+   ```ini
+   # Name: alice
+   [Peer]
+   PublicKey = AbCdEf...pubkey=
+   AllowedIPs = 10.8.1.2/32
+   ```
+3. **JSON-файл `peers.json`** (внутри контейнера `/data/peers.json`), для ручных правок:
+   ```json
+   {
+     "AbCdEf...pubkey1=": "alice",
+     "GhIjKl...pubkey2=": "bob"
+   }
+   ```
 
-**Вариант B — комментарии в `*.conf`** (`/etc/wireguard` примонтирован read-only):
-```
-# Name: alice
-[Peer]
-PublicKey = AbCdEf...pubkey1=
-AllowedIPs = 10.0.0.2/32
-```
+Если ни в одном источнике имени не нашлось, label будет `name=""`. Все три источника можно использовать одновременно: например, из `clientsTable` имена подтягиваются автоматически, а конкретного клиента, для которого имя не нравится, можно переопределить в `peers.json`.
 
-Если имя для пира не найдено, label `name=""`.
+Кэш имён обновляется каждые `AMNEZIA_SCRAPE_INTERVAL` секунд — добавили `# Name:` в `awg0.conf`, через 30 секунд экспортер увидит. Никаких рестартов туннеля или контейнера не нужно.
 
-## Запуск
+## Конфигурация
+
+Все настройки — через переменные окружения (`.env`). Пример: см. `.env.example`.
+
+| Переменная | По умолчанию | Что делает |
+|---|---|---|
+| `AMNEZIA_EXPORTER_PORT` | `9352` | HTTP-порт `/metrics` |
+| `AMNEZIA_SCRAPE_INTERVAL` | `30` | Период между реальными вызовами `wg/awg dump` (кэш) |
+| `AMNEZIA_WG_ENABLE` | `1` | `0` — не дёргать дамп, peer-метрик не будет (полезно для дебага HTTP) |
+| `AMNEZIA_WG_CMD` | `wg show all dump` | Для AmneziaWG поменяйте на `awg show all dump` |
+| `AMNEZIA_WG_TIMEOUT` | `5` | Таймаут на одну команду dump |
+| `AMNEZIA_CLIENTS_TABLE` | `/opt/amnezia/awg/clientsTable:/opt/amnezia/wireguard/clientsTable` | Пути к реестру клиентов Amnezia (можно несколько через `:`) |
+| `AMNEZIA_PEERS_CONF_DIR` | `/etc/wireguard` | Каталог `*.conf`. Для AmneziaWG обычно `/etc/amnezia/amneziawg` |
+| `AMNEZIA_PEERS_JSON` | `/data/peers.json` | Ручной JSON-словарь pubkey → name |
+
+## Запуск (Docker Compose)
 
 ```bash
 cd /opt/amnezi-exporter
 cp .env.example .env
-# на хосте с интерфейсом wg, часто: network_mode: host + AMNEZIA_WG_ENABLE=1
+nano .env                 # выставить AMNEZIA_WG_CMD под свою установку
+
+# Без peers.json compose не стартует — создайте хотя бы пустой
+echo '{}' > peers.json
+
 docker compose up -d --build
-curl -s http://localhost:9352/metrics
+docker logs --tail=30 amnezi-exporter
+curl -s http://localhost:9352/metrics | grep '^amnezia_'
 ```
 
-## awg вместо wg
+`docker-compose.yml` уже настроен под AmneziaWG-сервер и делает важные вещи:
 
-В образе — `wireguard-tools` (`wg`). Для AmneziaWG команда: `amnezia_wg`/`awg` — поставь пакет или смонтируй бинарь; в `.env` задай `AMNEZIA_WG_CMD=awg show all dump`.
+- `network_mode: host` — иначе из контейнера не виден хостовый интерфейс `awg0`/`wg0` и `awg show` ничего не вернёт (порт `9352` при этом сам слушается на хосте, отдельный `ports:` не нужен).
+- `cap_add: NET_ADMIN` — нужен `awg/wg show` для чтения статистики.
+- Монтирование `/etc/amnezia/amneziawg`, `/opt/amnezia/awg` и `/usr/bin/awg` (read-only) — конфиги, реестр клиентов и сам бинарь `awg`, которого нет в `python:slim` образе.
+
+Если у вас классический WireGuard, а не AmneziaWG:
+
+1. `AMNEZIA_WG_CMD=wg show all dump` в `.env`.
+2. В `docker-compose.yml` замените монтирование `/etc/amnezia/amneziawg` на `/etc/wireguard` и `AMNEZIA_PEERS_CONF_DIR` подкрутите аналогично; пробрасывать `/usr/bin/awg` не нужно, `wg` уже есть в образе (ставится через `wireguard-tools`).
+
+## Проверка работоспособности
+
+```bash
+curl -s http://localhost:9352/metrics | grep -E '^amnezia_wg_(peer_count|scrape_ok|peer_receive)' | head
+```
+
+Ожидаемо:
+
+```
+amnezia_wg_scrape_ok 1.0
+amnezia_wg_peer_count 8.0
+amnezia_wg_peer_receive_bytes{interface="awg0",name="alice",peer_id="p_…",pubkey_short="BpSC/YYrBCs4"} 12345.0
+```
+
+### Если что-то не так
+
+| Симптом | Где копать |
+|---|---|
+| `amnezia_wg_scrape_ok 0` или `peer_count 0` | `docker exec amnezi-exporter awg show all dump` — если пусто или ошибка, проверьте `network_mode: host`, `cap_add: NET_ADMIN`, проброс `/usr/bin/awg`. |
+| `awg: command not found` внутри контейнера | На хосте: `which awg`. Если путь отличается — поправьте volume в compose. |
+| `peer_count` корректный, но `name=""` для всех | Экспортер не видит источник имён. `docker exec amnezi-exporter ls /etc/amnezia/amneziawg` и `docker exec amnezi-exporter ls /opt/amnezia/awg`. Проверьте `AMNEZIA_PEERS_CONF_DIR` в `.env`. |
+| Имена есть только для части пиров | Над оставшимися `[Peer]` в `awg0.conf` нет коммента `# Name: …`. Допишите — через 30 сек подтянется. |
+
+## Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: amnezi-exporter
+    static_configs:
+      - targets: ['vpn-host:9352']
+```

@@ -4,15 +4,20 @@ services:
     image: amnezi-exporter:local
     container_name: amnezi-exporter
     restart: unless-stopped
-    ports:
-      - "${AMNEZIA_EXPORTER_PORT:-9352}:9352"
+    # network_mode: host обязателен, чтобы `awg show` внутри контейнера видел
+    # хостовые интерфейсы (awg0/wg0). При нём ports: не нужен, экспортер
+    # сразу слушает 0.0.0.0:9352 на хосте.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
     env_file:
       - .env
     volumes:
-      # JSON-мапа имён pubkey -> name (создашь сам, см. README)
+      # JSON-мапа pubkey -> name (создаётся сам, см. README; используется как 3-й источник)
       - ./peers.json:/data/peers.json:ro
-      # Конфиги wg/awg с комментариями "# Name: alice" перед [Peer]
-      - /etc/wireguard:/etc/wireguard:ro
-    # Чтобы `wg show` / `awg show` видел хост-интерфейсы, при необходимости:
-    # network_mode: host
-    # privileged: true
+      # Конфиги AmneziaWG с комментариями "# Name: alice" перед [Peer] (2-й источник имён)
+      - /etc/amnezia/amneziawg:/etc/amnezia/amneziawg:ro
+      # Реестр клиентов Amnezia-сервера, если есть (1-й источник имён)
+      - /opt/amnezia/awg:/opt/amnezia/awg:ro
+      # Хостовый бинарь awg, в slim-образе его нет
+      - /usr/bin/awg:/usr/bin/awg:ro
