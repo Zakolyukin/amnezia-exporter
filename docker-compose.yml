@@ -1,0 +1,18 @@
+services:
+  amnezi-exporter:
+    build: .
+    image: amnezi-exporter:local
+    container_name: amnezi-exporter
+    restart: unless-stopped
+    ports:
+      - "${AMNEZIA_EXPORTER_PORT:-9352}:9352"
+    env_file:
+      - .env
+    volumes:
+      # JSON-мапа имён pubkey -> name (создашь сам, см. README)
+      - ./peers.json:/data/peers.json:ro
+      # Конфиги wg/awg с комментариями "# Name: alice" перед [Peer]
+      - /etc/wireguard:/etc/wireguard:ro
+    # Чтобы `wg show` / `awg show` видел хост-интерфейсы, при необходимости:
+    # network_mode: host
+    # privileged: true
